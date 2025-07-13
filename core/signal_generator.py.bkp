@@ -1,0 +1,160 @@
+import pandas_ta as ta
+import numpy as np
+import requests
+import os
+from datetime import datetime, timedelta
+
+# === External Sentiment Analysis via Fear & Greed Index (no API key needed) ===
+def fetch_sentiment_score(symbol=None):
+    try:
+        resp = requests.get("https://api.alternative.me/fng/?limit=1")
+        print("📡 F&G status:", resp.status_code)
+        data = resp.json()
+        entry = data.get("data")[0]
+        value = int(entry['value'])
+        label = entry['value_classification'].lower()
+
+        print(f"❤️ Fear & Greed: {value} ({label})")
+        return label  # e.g. "greed", "fear", "neutral"
+    except Exception as e:
+        print("⚠️ F&G fetch error", e)
+        return "unknown"
+
+# === Fetch recent time-series sentiment for per-coin momentum ===
+def fetch_sentiment_time_series(symbol, hours=6):
+    if not symbol:
+        print("⚠️ Symbol is None — skipping sentiment fetch")
+        return []
+    print(f"Hi {symbol}")
+    token = "ttcaifrc4c4asajocy79har7hmd0iv1xm73sqbw"
+    coin = symbol.replace("/USDT", "").lower()
+    end_ts = int(datetime.utcnow().timestamp())
+    start_ts = end_ts - hours * 3600
+    url = (
+        f"https://lunarcrush.com/api4/public/coins/{coin}/time-series/v2"
+        f"?bucket=hour&start={start_ts}&end={end_ts}"
+    )
+    headers = {'Authorization': f'Bearer {token}'}
+    try:
+        response = requests.get(url, headers=headers)
+        data = response.json().get("data", [])
+        return data
+    except Exception as e:
+        print(f"⚠️ Error fetching sentiment time-series for {symbol}: {e}")
+        return []
+
+def analyze_sentiment_trend(series):
+    galaxy = [rec.get("galaxy_score") for rec in series if rec.get("galaxy_score") is not None]
+    if len(galaxy) < 2:
+        return "flat"
+    return "rising" if galaxy[-1] > galaxy[-2] else "falling"
+
+def generate_signal(df):
+    df = df.copy()
+    df.ta.macd(append=True)
+    df.ta.rsi(append=True)
+    bb = df.ta.bbands(length=20, std=2.0, append=True)
+    df.ta.supertrend(append=True)
+
+    try:
+        macd_hist = df['MACDh_12_26_9'].iloc[-1]
+        rsi = df['RSI_14'].iloc[-1]
+        rsi_prev = df['RSI_14'].iloc[-2]
+        close = df['close'].iloc[-1]
+
+        bb_upper_col = [col for col in df.columns if col.startswith("BBU")][-1]
+        bb_lower_col = [col for col in df.columns if col.startswith("BBL")][-1]
+        upper = df[bb_upper_col].iloc[-1]
+        lower = df[bb_lower_col].iloc[-1]
+
+        supertrend = df['SUPERT_7_3.0'].iloc[-1]
+
+        if np.isnan(upper) or np.isnan(lower):
+            print("⚠️ BB values not ready yet — skipping signal")
+            return "hold"
+
+    except KeyError as e:
+        print(f"Missing indicator data: {e}")
+        return "hold"
+
+    votes = []
+    print("📊 Calculating votes based on indicators...")
+    if macd_hist > 0:
+        votes.append("long")
+    elif macd_hist < 0:
+        votes.append("short")
+
+    if rsi < 30:
+        votes.append("long")
+    elif rsi > 70:
+        votes.append("short")
+    else:
+        votes.append("hold")
+
+    if close < lower:
+        votes.append("long")
+    elif close > upper:
+        votes.append("short")
+    else:
+        votes.append("hold")
+
+    if close > supertrend:
+        votes.append("long")
+    else:
+        votes.append("short")
+
+    print(f"📊 Vote breakdown: {votes}")
+    final_signal = max(set(votes), key=votes.count)
+
+    if rsi_prev < 30 and rsi > 40:
+        print("🚨 RSI recovery — potential bullish reversal")
+    elif rsi_prev > 70 and rsi < 60:
+        print("🚨 RSI cooling — potential bearish reversal")
+
+    return final_signal
+
+def generate_signal_with_context(df_short, df_long, symbol=None):
+    print(f"\n🔎 Analyzing symbol: {symbol}")
+    signal_short = generate_signal(df_short)
+    print(f"🧠 Raw signal (15m): {signal_short}")
+    signal_long = generate_signal(df_long)
+    print(f"🧠 Raw signal (1h): {signal_long}")
+
+    sentiment = fetch_sentiment_score(symbol)
+    print(f"📉 Sentiment: {sentiment}")
+    ts_data = fetch_sentiment_time_series(symbol, hours=3)
+    ts_trend = analyze_sentiment_trend(ts_data)
+    print(f"📈 Sentiment Momentum: {ts_trend}")
+
+    # Block risky trades based on sentiment
+    if sentiment in ["greed", "extreme greed"] and signal_short == "long":
+        print("🛑 Greed detected — suppressing LONG")
+        signal_short = "hold"
+    if sentiment in ["fear", "extreme fear"] and signal_short == "short":
+        print("🛑 Fear detected — suppressing SHORT")
+        signal_short = "hold"
+
+    if signal_short == signal_long:
+        final = signal_short
+        context = f"✅ CONFIRMED TREND | Sentiment: {sentiment.upper()} | Momentum: {ts_trend}"
+    elif signal_short == "long" and signal_long == "short":
+        final = "hold"
+        context = f"⚠️ BULLISH SENTIMENT SHIFT DETECTED | Sentiment: {sentiment.upper()} | Momentum: {ts_trend}"
+    elif signal_short == "short" and signal_long == "long":
+        final = "hold"
+        context = f"⚠️ BEARISH SENTIMENT SHIFT DETECTED | Sentiment: {sentiment.upper()} | Momentum: {ts_trend}"
+    else:
+        final = "hold"
+        context = f"🤔 UNCERTAIN SIGNAL — HOLD | Sentiment: {sentiment.upper()} | Momentum: {ts_trend}"
+
+    return final, signal_short, signal_long, context
+
+def notify(symbol, signal, context=""):
+    icon = {
+        "long": "🟢",
+        "short": "🔴",
+        "hold": "⚪"
+    }.get(signal, "❔")
+
+    print(f"{icon} [{symbol}] Recommended Action: {signal.upper()} | {context}")
+

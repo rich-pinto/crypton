@@ -1,0 +1,36 @@
+import time
+import schedule
+from core.data_fetcher import fetch_candles
+from core.signal_generator import generate_signal_with_context
+from core.notifier import notify
+
+SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'XRP/USDT', 'SOL/USDT']
+
+def analyze():
+    for symbol in SYMBOLS:
+        try:
+            print(f"\n🔍 Checking {symbol}...")
+            df_15m = fetch_candles(symbol, timeframe='15m', limit=100)
+            df_1h = fetch_candles(symbol, timeframe='1h', limit=100)
+
+            if df_15m.empty or df_1h.empty:
+                print(f"[{symbol}] ❗ Not enough data for analysis.")
+                continue
+
+            final_signal, signal_15m, signal_1h, context = generate_signal_with_context(df_15m, df_1h, symbol)
+
+            print(f"[{symbol}] 15m: {signal_15m}, 1h: {signal_1h} → Action: {final_signal.upper()} | {context}")
+            notify(symbol, final_signal, context)
+
+        except Exception as e:
+            print(f"⚠️ Error analyzing {symbol}: {e}")
+    print("\n\n-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-xx-x-x--xx--x-x-x-x-x-x-x-x-x-x-x-x\n\n")
+
+print("🚀 Bot started. First run now, then every 1 minute...\n")
+analyze()
+schedule.every(1).minutes.do(analyze)
+
+while True:
+    schedule.run_pending()
+    time.sleep(1)
+
